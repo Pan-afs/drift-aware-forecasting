@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Environment
+.env
+
+# Local data and outputs
+data/
+reports/*.csv
+logs/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
