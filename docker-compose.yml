@@ -1,0 +1,110 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow/Dockerfile
+  image: daf-airflow:latest
+  env_file: .env
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+    PYTHONPATH: /opt/airflow/src
+    DAF_CONFIG_DIR: /opt/airflow/configs
+    DAF_DATA_DIR: /opt/airflow/data
+    CLICKHOUSE_HOST: clickhouse
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./src:/opt/airflow/src
+    - ./configs:/opt/airflow/configs
+    - ./data:/opt/airflow/data
+    - airflow-logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-daf}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-daf}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-daf}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create --role Admin \
+          --username "$${_AIRFLOW_WWW_USER_USERNAME:-admin}" \
+          --password "$${_AIRFLOW_WWW_USER_PASSWORD:-admin}" \
+          --firstname Admin --lastname User --email admin@example.com || true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  clickhouse-data:
+  airflow-logs:
