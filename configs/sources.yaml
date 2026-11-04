@@ -1,0 +1,15 @@
+fred:
+  start: "1990-01-01"
+  # FRED revises recent values and runs annual benchmark revisions, so each
+  # run re-pulls this many days of history.
+  revision_lookback_days: 400
+  series:
+    - id: UNRATE      # Unemployment rate, monthly
+    - id: PAYEMS      # Total nonfarm payrolls, monthly
+    - id: ICSA        # Initial jobless claims, weekly (sharp COVID-19 break)
+    - id: CPIAUCSL    # Consumer price index, monthly
+    - id: FEDFUNDS    # Effective federal funds rate, monthly
+    - id: DGS10       # 10-year Treasury yield, daily
+    - id: INDPRO      # Industrial production index, monthly
+    - id: GDPC1       # Real GDP, quarterly
+    - id: DEXUSEU     # USD per EUR exchange rate, daily
