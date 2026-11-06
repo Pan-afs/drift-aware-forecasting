@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import logging
 import re
+import zipfile
 from datetime import date
 from pathlib import Path
+from typing import Sequence
 
+import pandas as pd
 import requests
 
 log = logging.getLogger(__name__)
@@ -28,6 +31,25 @@ DATAVERSE_URL = "https://dataverse.harvard.edu"
 FILE_PATTERN = re.compile(r"sms-call-internet-mi-(\d{4}-\d{2}-\d{2})")
 FIRST_DAY = date(2013, 11, 1)
 LAST_DAY = date(2014, 1, 1)
+
+COLUMNS = [
+    "square_id",
+    "time_interval",
+    "country_code",
+    "sms_in",
+    "sms_out",
+    "call_in",
+    "call_out",
+    "internet",
+]
+ACTIVITIES = ["sms_in", "sms_out", "call_in", "call_out", "internet"]
+DTYPES = {
+    "square_id": "int32",
+    "time_interval": "int64",
+    "country_code": "int32",
+    **{a: "float32" for a in ACTIVITIES},
+}
+CITY = "city"
 
 
 class DataverseClient:
@@ -112,3 +134,78 @@ def fetch_day(
         raise FileNotFoundError(f"no Dataverse file for {day}")
     log.info("downloading Telecom Italia file for %s", day)
     return client.download(index[day], cache_dir / f"sms-call-internet-mi-{day.isoformat()}.txt")
+
+
+def _first_line(path: Path) -> str:
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as zf, zf.open(zf.namelist()[0]) as fh:
+            return fh.readline().decode("utf-8", errors="replace")
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        return fh.readline()
+
+
+def read_day_file(path: Path) -> pd.DataFrame:
+    """Read one daily file (plain or zipped, with or without a header row)."""
+    first = _first_line(path).split("\t", 1)[0].strip().strip('"')
+    has_header = not first.isdigit()
+    return pd.read_csv(
+        path,
+        sep="\t",
+        header=0 if has_header else None,
+        names=COLUMNS,
+        dtype=DTYPES,
+        compression="zip" if zipfile.is_zipfile(path) else None,
+    )
+
+
+def series_id(activity: str, area: str | int) -> str:
+    """``internet/city`` for the whole grid, ``internet/sq5060`` for one cell."""
+    return f"{activity}/{area if area == CITY else f'sq{int(area)}'}"
+
+
+def build_series(
+    raw: pd.DataFrame,
+    squares: Sequence[int] = (),
+    activities: Sequence[str] = ACTIVITIES,
+    freq: str = "1h",
+) -> pd.DataFrame:
+    """Aggregate raw grid rows into long-format observations.
+
+    Activity is summed over country codes, giving one series per activity for
+    the whole city and one per selected grid cell, then resampled to ``freq``.
+    Missing 10-minute intervals are *not* imputed: a hole in the raw feed shows
+    up as NaN or as an undercounted bucket, which is exactly what the quality
+    checks are meant to catch.
+    """
+    activities = list(activities)
+    unknown = set(activities) - set(ACTIVITIES)
+    if unknown:
+        raise ValueError(f"unknown activities: {sorted(unknown)}")
+
+    frame = raw[["square_id", "time_interval", *activities]].copy()
+    frame["ts"] = pd.to_datetime(frame["time_interval"], unit="ms", utc=True)
+
+    groups: dict[str | int, pd.DataFrame] = {
+        CITY: frame.groupby("ts")[activities].sum(min_count=1)
+    }
+    cells = frame[frame["square_id"].isin(list(squares))]
+    for square, sub in cells.groupby("square_id"):
+        groups[int(square)] = sub.groupby("ts")[activities].sum(min_count=1)
+
+    parts = []
+    for area, wide in groups.items():
+        wide = wide.astype("float64").resample(freq).sum(min_count=1)
+        for activity in activities:
+            parts.append(
+                pd.DataFrame(
+                    {
+                        "source": SOURCE,
+                        "series_id": series_id(activity, area),
+                        "ts": wide.index,
+                        "value": wide[activity].to_numpy(),
+                    }
+                )
+            )
+    if not parts:
+        return pd.DataFrame(columns=["source", "series_id", "ts", "value"])
+    return pd.concat(parts, ignore_index=True)
