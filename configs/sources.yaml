@@ -13,3 +13,15 @@ fred:
     - id: INDPRO      # Industrial production index, monthly
     - id: GDPC1       # Real GDP, quarterly
     - id: DEXUSEU     # USD per EUR exchange rate, daily
+
+telecom_milan:
+  doi: "doi:10.7910/DVN/EGZHFV"
+  start: "2013-11-01"
+  end: "2014-01-01"
+  freq: "1h"
+  # Weekly cycle at hourly resolution; weekday and weekend traffic differ a lot.
+  seasonal_period: 168
+  activities: [internet, call_in, sms_in]
+  # Grid cells (1..10000) to keep as individual series next to the city total.
+  # Cells around the city centre; edit to taste.
+  squares: [5060, 5061, 5160, 4159, 4556]
