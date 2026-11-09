@@ -52,6 +52,15 @@ class Verdict:
     evidence: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class Peer:
+    """A related series with its own seasonal period (peers may differ in
+    frequency from the target, e.g. weekly claims next to monthly payrolls)."""
+
+    series: pd.Series
+    period: int = 1
+
+
 def _clean(s: pd.Series) -> pd.Series:
     return s[~s.index.duplicated(keep="last")].sort_index().astype(float)
 
@@ -138,15 +147,17 @@ def _assess(
 
 
 def _peer_onsets(
-    peers: Mapping[str, pd.Series], period: int, config: DetectorConfig
+    peers: Mapping[str, pd.Series | Peer], period: int, config: DetectorConfig
 ) -> dict[str, list[pd.Timestamp]]:
     onsets = {}
     for name, peer in peers.items():
-        peer = _clean(peer)
-        if peer.notna().sum() < 3 * config.baseline_window(period):
+        if not isinstance(peer, Peer):
+            peer = Peer(peer, period)
+        series = _clean(peer.series)
+        if series.notna().sum() < 3 * config.baseline_window(peer.period):
             continue  # too short to have a baseline; not a usable witness
-        dec = decompose(peer, period, config)
-        onsets[name] = [dec.index[e.start] for e in detect_events(dec, config, period)]
+        dec = decompose(series, peer.period, config)
+        onsets[name] = [dec.index[e.start] for e in detect_events(dec, config, peer.period)]
     return onsets
 
 
@@ -209,13 +220,14 @@ def classify_changes(
     s: pd.Series,
     period: int = 1,
     config: DetectorConfig | None = None,
-    peers: Mapping[str, pd.Series] | None = None,
+    peers: Mapping[str, pd.Series | Peer] | None = None,
 ) -> list[Verdict]:
     """Find sudden changes in ``s`` and label each one.
 
     ``s`` should be on a regular grid (missing timestamps as NaN) so that
     ``period`` lines up with the seasonal cycle. ``peers`` are related series
-    used to corroborate or question each verdict.
+    used to corroborate or question each verdict; a plain Series is assumed
+    to share the target's period.
     """
     config = config or DetectorConfig()
     s = _clean(s)

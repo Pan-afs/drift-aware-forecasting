@@ -1,4 +1,4 @@
-"""Backfill the Telecom Italia Milan dataset into ClickHouse.
+"""Backfill the Telecom Italia Milan dataset into ClickHouse and check its quality.
 
 The dataset is static (Nov 2013 - Jan 2014), so the DAG is triggered manually
 with an optional date range instead of running on a schedule.
@@ -12,8 +12,14 @@ from airflow.models.param import Param
 from airflow.operators.python import get_current_context
 
 from daf.config import load_sources
+from daf.ingest.telecom_milan import CITY, SOURCE, series_id
 
 MILAN = load_sources()["telecom_milan"]
+SERIES_IDS = [
+    series_id(activity, area)
+    for activity in MILAN["activities"]
+    for area in [CITY, *MILAN["squares"]]
+]
 
 
 @dag(
@@ -53,7 +59,8 @@ def telecom_milan_ingest():
 
         settings = Settings.from_env()
         client = DataverseClient(api_token=settings.dataverse_api_token)
-        path = fetch_day(date.fromisoformat(day), settings.data_dir / "raw" / "telecom_milan", client)
+        cache_dir = settings.data_dir / "raw" / "telecom_milan"
+        path = fetch_day(date.fromisoformat(day), cache_dir, client)
 
         frame = build_series(
             read_day_file(path),
@@ -66,14 +73,8 @@ def telecom_milan_ingest():
     @task
     def register_series() -> list[str]:
         from daf.config import Settings
-        from daf.ingest.telecom_milan import CITY, SOURCE, series_id
         from daf.storage import ClickHouseStore
 
-        ids = [
-            series_id(activity, area)
-            for activity in MILAN["activities"]
-            for area in [CITY, *MILAN["squares"]]
-        ]
         ClickHouseStore(Settings.from_env().clickhouse).upsert_series_meta(
             {
                 "source": SOURCE,
@@ -83,11 +84,34 @@ def telecom_milan_ingest():
                 "units": "rescaled activity count",
                 "seasonal_period": MILAN["seasonal_period"],
             }
-            for sid in ids
+            for sid in SERIES_IDS
         )
-        return ids
+        return SERIES_IDS
 
-    ingest_day.expand(day=list_days()) >> register_series()
+    @task(max_active_tis_per_dagrun=4)
+    def check_quality(sid: str) -> int:
+        from daf.config import Settings
+        from daf.quality.runner import run_quality
+        from daf.storage import ClickHouseStore
+
+        # Peers: every other area for the same activity. A real change in how
+        # people use the network (holidays, events) hits many cells at once.
+        activity = sid.split("/", 1)[0]
+        peers = [p for p in SERIES_IDS if p.startswith(f"{activity}/") and p != sid]
+        return run_quality(
+            ClickHouseStore(Settings.from_env().clickhouse),
+            SOURCE,
+            sid,
+            peer_ids=peers,
+            run_id=get_current_context()["run_id"],
+            period=MILAN["seasonal_period"],
+            freq=MILAN["freq"],
+            flatline_run=MILAN.get("flatline_run"),
+        )
+
+    ids = register_series()
+    ingest_day.expand(day=list_days()) >> ids
+    check_quality.expand(sid=ids)
 
 
 telecom_milan_ingest()
