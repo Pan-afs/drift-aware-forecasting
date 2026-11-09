@@ -13,12 +13,23 @@ too few points observed yet    a spike and a shift look the same       pending
 values return to expected      transient spike, bad value              data_error
 values stay at the new level   persistent change in the process        drift
 =============================  ======================================  ============
+
+When related series are available (other grid cells, indicators from the
+same part of the economy) they act as witnesses. A real shift in the
+underlying process usually shows up in several of them at once, while a
+broken feed is usually isolated:
+
+* persistent shift, peers moved too    -> drift, higher confidence
+* persistent shift, no peer moved      -> inconclusive (could be a definition
+  or reporting change in that one series)
+* transient spike, peers spiked too    -> inconclusive (a real short-lived
+  event such as a holiday, not a broken value)
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -126,21 +137,95 @@ def _assess(
     )
 
 
+def _peer_onsets(
+    peers: Mapping[str, pd.Series], period: int, config: DetectorConfig
+) -> dict[str, list[pd.Timestamp]]:
+    onsets = {}
+    for name, peer in peers.items():
+        peer = _clean(peer)
+        if peer.notna().sum() < 3 * config.baseline_window(period):
+            continue  # too short to have a baseline; not a usable witness
+        dec = decompose(peer, period, config)
+        onsets[name] = [dec.index[e.start] for e in detect_events(dec, config, period)]
+    return onsets
+
+
+def _with_peers(
+    verdict: Verdict,
+    peer_onsets: dict[str, list[pd.Timestamp]],
+    tolerance: pd.Timedelta,
+    config: DetectorConfig,
+) -> Verdict:
+    if not peer_onsets or verdict.label in (PENDING, INCONCLUSIVE):
+        return verdict
+    if verdict.label == DATA_ERROR and not verdict.reason.startswith("transient"):
+        return verdict  # stuck feeds and unit errors are not explained by peers
+
+    hits = sorted(
+        name
+        for name, onsets in peer_onsets.items()
+        if any(abs(t - verdict.ts_start) <= tolerance for t in onsets)
+    )
+    support = len(hits) / len(peer_onsets)
+    evidence = {**verdict.evidence, "peer_support": round(support, 2), "peers_moved": hits}
+    seen = f"{len(hits)}/{len(peer_onsets)} peer series"
+
+    if verdict.label == DATA_ERROR:
+        if support < config.peer_min_support:
+            return replace(verdict, evidence=evidence)
+        return Verdict(
+            INCONCLUSIVE,
+            f"short-lived change also seen in {seen}: likely a real event, not a bad value",
+            round(0.4 + 0.4 * support, 2),
+            verdict.ts_start,
+            verdict.ts_end,
+            evidence,
+        )
+
+    persistence = verdict.evidence.get("persistence", 1.0)
+    if support >= config.peer_min_support:
+        return Verdict(
+            DRIFT,
+            f"{verdict.reason}; {seen} shifted at the same time",
+            round(min(0.99, 0.5 + 0.25 * persistence + 0.25 * support), 2),
+            verdict.ts_start,
+            verdict.ts_end,
+            evidence,
+        )
+    if not hits:
+        return Verdict(
+            INCONCLUSIVE,
+            f"{verdict.reason}, but none of the {len(peer_onsets)} peer series moved: "
+            "possible definition or reporting change",
+            0.5,
+            verdict.ts_start,
+            verdict.ts_end,
+            evidence,
+        )
+    return replace(verdict, reason=f"{verdict.reason}; {seen} moved", evidence=evidence)
+
+
 def classify_changes(
     s: pd.Series,
     period: int = 1,
     config: DetectorConfig | None = None,
+    peers: Mapping[str, pd.Series] | None = None,
 ) -> list[Verdict]:
     """Find sudden changes in ``s`` and label each one.
 
     ``s`` should be on a regular grid (missing timestamps as NaN) so that
-    ``period`` lines up with the seasonal cycle.
+    ``period`` lines up with the seasonal cycle. ``peers`` are related series
+    used to corroborate or question each verdict.
     """
     config = config or DetectorConfig()
     s = _clean(s)
     dec = decompose(s, period, config)
     events = detect_events(dec, config, period)
     refractory = config.baseline_window(period) // 2
+
+    peer_onsets = _peer_onsets(peers, period, config) if peers else {}
+    step = pd.Series(s.index).diff().median() if len(s) > 1 else pd.Timedelta(0)
+    tolerance = config.peer_tolerance * step
 
     verdicts: list[Verdict] = []
     last_shift_end: int | None = None
@@ -157,8 +242,9 @@ def classify_changes(
             continue
 
         label, reason, confidence, evidence = _assess(dec, event, config, period)
-        verdicts.append(
-            Verdict(label, reason, confidence, dec.index[event.start], dec.index[event.end], evidence)
+        verdict = Verdict(
+            label, reason, confidence, dec.index[event.start], dec.index[event.end], evidence
         )
+        verdicts.append(_with_peers(verdict, peer_onsets, tolerance, config))
         last_shift_end = event.end if label in (DRIFT, INCONCLUSIVE) else None
     return verdicts
