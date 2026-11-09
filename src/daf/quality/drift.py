@@ -25,12 +25,12 @@ MAD_TO_SIGMA = 1.4826
 @dataclass(frozen=True)
 class DetectorConfig:
     z_threshold: float = 4.5
-    cusum_k: float = 0.5
+    cusum_k: float = 0.75
     cusum_h: float = 10.0
-    # Points used for the causal baseline; default max(period, 24).
+    # Points used for the causal baseline; default max(2 * period, 24).
     window: int | None = None
     # Points after an event used to judge whether it persists; default
-    # clip(window // 4, 8, 48).
+    # clip(window // 4, 6, 48).
     persistence_window: int | None = None
     # Share of post-event points that must stay at the new level for drift.
     persistence_min: float = 0.6
@@ -41,12 +41,12 @@ class DetectorConfig:
     peer_min_support: float = 0.3
 
     def baseline_window(self, period: int) -> int:
-        return self.window or max(period, 24)
+        return self.window or max(2 * period, 24)
 
     def post_window(self, period: int) -> int:
         if self.persistence_window:
             return self.persistence_window
-        return int(np.clip(self.baseline_window(period) // 4, 8, 48))
+        return int(np.clip(self.baseline_window(period) // 4, 6, 48))
 
 
 @dataclass
@@ -128,14 +128,14 @@ def decompose(s: pd.Series, period: int = 1, config: DetectorConfig | None = Non
     )
 
 
-def cusum_onsets(z: np.ndarray, k: float = 0.5, h: float = 10.0) -> list[int]:
+def cusum_alarms(z: np.ndarray, k: float = 0.75, h: float = 10.0) -> list[tuple[int, int]]:
     """Two-sided tabular CUSUM on standardised residuals.
 
-    Returns the estimated onset (last index where the statistic was zero) of
-    each alarm. Inputs are clipped at +-h so one huge outlier cannot leave
-    residual mass in the statistic.
+    Returns ``(onset, alarm)`` index pairs, where the onset is the point at
+    which the statistic last started accumulating. Inputs are clipped at +-h
+    so one huge outlier cannot leave residual mass in the statistic.
     """
-    onsets: list[int] = []
+    alarms: list[tuple[int, int]] = []
     pos = neg = 0.0
     pos_start = neg_start = 0
     for i, v in enumerate(z):
@@ -150,16 +150,22 @@ def cusum_onsets(z: np.ndarray, k: float = 0.5, h: float = 10.0) -> list[int]:
             neg_start = i
         pos, neg = new_pos, new_neg
         if pos > h or neg > h:
-            onsets.append(pos_start if pos > h else neg_start)
+            alarms.append((pos_start if pos > h else neg_start, i))
             pos = neg = 0.0
-    return onsets
+    return alarms
 
 
 def detect_events(dec: Decomposition, config: DetectorConfig, period: int = 1) -> list[ChangeEvent]:
     z = dec.z
     finite = np.isfinite(z)
-    big = np.flatnonzero(finite & (np.abs(np.where(finite, z, 0.0)) > config.z_threshold))
-    candidates = sorted(set(big.tolist()) | set(cusum_onsets(z, config.cusum_k, config.cusum_h)))
+    is_big = finite & (np.abs(np.where(finite, z, 0.0)) > config.z_threshold)
+    candidates = set(np.flatnonzero(is_big).tolist())
+    for onset, alarm in cusum_alarms(z, config.cusum_k, config.cusum_h):
+        # An alarm fired by one large jump is already a candidate; its onset
+        # would only be noise that happened to accumulate beforehand.
+        if not is_big[onset : alarm + 1].any():
+            candidates.add(onset)
+    candidates = sorted(candidates)
     if not candidates:
         return []
 
