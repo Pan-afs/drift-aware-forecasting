@@ -44,7 +44,9 @@ def duplicate_timestamps(s: pd.Series) -> list[Issue]:
     return [Issue("duplicate_timestamp", t, t, 1, "timestamp appears more than once") for t in dup]
 
 
-def timestamp_gaps(s: pd.Series, freq: str | None = None, max_step_ratio: float = 1.5) -> list[Issue]:
+def timestamp_gaps(
+    s: pd.Series, freq: str | None = None, max_step_ratio: float = 1.5
+) -> list[Issue]:
     """Timestamps absent from the expected grid.
 
     With ``freq`` the grid is explicit (``pd.date_range``). Without it a gap is

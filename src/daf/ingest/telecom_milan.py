@@ -16,9 +16,9 @@ from __future__ import annotations
 import logging
 import re
 import zipfile
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
-from typing import Sequence
 
 import pandas as pd
 import requests

@@ -87,7 +87,9 @@ class FredClient:
             resp = self.session.get(url, params=query, timeout=self.timeout)
             if resp.status_code in RETRY_STATUS and attempt < self.max_retries:
                 wait = self.backoff * 2**attempt
-                log.warning("FRED %s returned %s, retrying in %.1fs", endpoint, resp.status_code, wait)
+                log.warning(
+                    "FRED %s returned %s, retrying in %.1fs", endpoint, resp.status_code, wait
+                )
                 time.sleep(wait)
                 continue
             if resp.status_code != 200:
