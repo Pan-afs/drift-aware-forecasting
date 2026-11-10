@@ -28,8 +28,9 @@ broken feed is usually isolated:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 import pandas as pd
