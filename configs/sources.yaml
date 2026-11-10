@@ -13,6 +13,12 @@ fred:
     - id: INDPRO      # Industrial production index, monthly
     - id: GDPC1       # Real GDP, quarterly
     - id: DEXUSEU     # USD per EUR exchange rate, daily
+  # Series expected to react to the same shocks. A persistent shift seen in
+  # peers too is treated as real drift; an isolated one is questioned.
+  peer_groups:
+    labour: [UNRATE, PAYEMS, ICSA]
+    prices_and_rates: [CPIAUCSL, FEDFUNDS, DGS10]
+    activity: [INDPRO, GDPC1, PAYEMS]
 
 telecom_milan:
   doi: "doi:10.7910/DVN/EGZHFV"
@@ -25,3 +31,5 @@ telecom_milan:
   # Grid cells (1..10000) to keep as individual series next to the city total.
   # Cells around the city centre; edit to taste.
   squares: [5060, 5061, 5160, 4159, 4556]
+  # Hours of identical traffic before a series is flagged as a stuck feed.
+  flatline_run: 6

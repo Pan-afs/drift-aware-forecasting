@@ -48,7 +48,34 @@ def fred_ingest():
             "rows": rows,
         }
 
-    ingest_series.expand(series_id=SERIES_IDS)
+    # Runs after every series is loaded, so peers are up to date.
+    @task(max_active_tis_per_dagrun=4)
+    def check_quality(result: dict) -> int:
+        from airflow.operators.python import get_current_context
+
+        from daf.config import Settings
+        from daf.ingest.fred import PANDAS_FREQ
+        from daf.quality.runner import peers_for, run_quality
+        from daf.storage import ClickHouseStore
+
+        series_id = result["series_id"]
+        return run_quality(
+            ClickHouseStore(Settings.from_env().clickhouse),
+            "fred",
+            series_id,
+            peer_ids=peers_for(series_id, FRED.get("peer_groups", {})),
+            run_id=get_current_context()["run_id"],
+            freq_of=PANDAS_FREQ.get,
+            period=result["seasonal_period"],
+            freq=PANDAS_FREQ.get(result["frequency"]),
+            # Daily FRED series mark market holidays as missing; not an error.
+            check_missing=result["frequency"] != "D",
+            # Spreads and growth rates can be negative. No flatline check either:
+            # policy rates can legitimately sit still for years.
+            non_negative=False,
+        )
+
+    check_quality.expand(result=ingest_series.expand(series_id=SERIES_IDS))
 
 
 fred_ingest()

@@ -10,6 +10,18 @@ from daf.config import ClickHouseSettings
 
 OBS_COLUMNS = ["source", "series_id", "ts", "value"]
 META_COLUMNS = ["source", "series_id", "title", "frequency", "units", "seasonal_period"]
+FLAG_COLUMNS = [
+    "source",
+    "series_id",
+    "ts_start",
+    "ts_end",
+    "check_name",
+    "verdict",
+    "confidence",
+    "reason",
+    "evidence",
+    "run_id",
+]
 
 
 class ClickHouseStore:
@@ -99,6 +111,41 @@ class ClickHouseStore:
         if data:
             self.client.insert("series_meta", data, column_names=META_COLUMNS)
         return len(data)
+
+    # -- quality flags --------------------------------------------------
+
+    def replace_flags(
+        self, source: str, series_id: str, flags: pd.DataFrame, run_id: str = ""
+    ) -> int:
+        """Store the current assessment of a series, dropping its older flags.
+
+        Each run re-assesses the full history, so earlier flags (e.g. a
+        'pending' verdict that has since resolved) are removed first.
+        """
+        self.client.command(
+            "DELETE FROM quality_flags WHERE source = {source:String} "
+            "AND series_id = {series_id:String}",
+            parameters={"source": source, "series_id": series_id},
+        )
+        if flags.empty:
+            return 0
+        rows = [
+            (
+                source,
+                series_id,
+                pd.Timestamp(r.ts_start).to_pydatetime(),
+                pd.Timestamp(r.ts_end).to_pydatetime(),
+                r.check_name,
+                r.verdict,
+                float(r.confidence),
+                r.reason,
+                r.evidence,
+                run_id,
+            )
+            for r in flags.itertuples(index=False)
+        ]
+        self.client.insert("quality_flags", rows, column_names=FLAG_COLUMNS)
+        return len(rows)
 
     def get_series_meta(self, source: str) -> pd.DataFrame:
         return self.client.query_df(
