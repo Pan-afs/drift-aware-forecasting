@@ -98,8 +98,13 @@ def _assess(
         return DATA_ERROR, f"feed stuck at {what} after the change", 0.95, evidence
 
     # 2. Scaling by a power of ten (units changed, decimal point moved).
-    if b0 > 0 and b0 + anomalous > 0:
-        ratio = (b0 + anomalous) / b0
+    # Raw levels are used here: rescaling also rescales the seasonal pattern,
+    # which would distort the seasonally adjusted values.
+    raw_event = dec.values[event.start : event.end + 1]
+    pre_level = float(np.median(raw_pre)) if len(raw_pre) else np.nan
+    event_level = float(np.nanmedian(raw_event)) if np.isfinite(raw_event).any() else np.nan
+    if pre_level > 0 and event_level > 0:
+        ratio = event_level / pre_level
         log_ratio = float(np.log10(ratio))
         k = int(round(log_ratio))
         if k != 0 and abs(log_ratio - k) <= config.unit_tolerance:
