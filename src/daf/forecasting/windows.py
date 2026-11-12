@@ -2,8 +2,7 @@
 
 The last ``n_windows * stride`` points of every series are held out; each
 window forecasts ``prediction_length`` steps from its origin using only the
-data before it. Windows never overlap the future of an earlier origin's
-context, so there is no leakage.
+data before it, so there is no leakage from the target into the context.
 """
 
 from __future__ import annotations
