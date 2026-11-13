@@ -1,5 +1,8 @@
 """Accuracy vs. speed benchmark for compressed Chronos-Bolt variants.
 
+    python -m daf.forecasting.benchmark --source telecom_milan
+    python -m daf.forecasting.benchmark --source fred --frequency M --prediction-length 12
+
 Every variant forecasts the same rolling-origin windows. Accuracy is MASE
 (median forecast) and WQL (all quantiles); speed is per-batch latency and
 throughput on CPU; size is the serialized state dict. A seasonal-naive row is
@@ -8,9 +11,13 @@ included as the floor any model has to beat.
 
 from __future__ import annotations
 
+import argparse
 import time
+import uuid
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -224,3 +231,114 @@ def to_markdown(results: pd.DataFrame, title: str = "Benchmark") -> str:
     for _, row in results.iterrows():
         lines.append("| " + " | ".join(fmt(row[c[0]], c[2]) for c in columns) + " |")
     return "\n".join(lines) + "\n"
+
+
+# -- data loading and CLI ----------------------------------------------------
+
+
+def load_csv(path: Path) -> dict[str, pd.Series]:
+    """Long-format CSV with columns series_id, ts, value."""
+    df = pd.read_csv(path, parse_dates=["ts"])
+    return {
+        str(sid): g.set_index("ts")["value"].astype(float).sort_index()
+        for sid, g in df.groupby("series_id")
+    }
+
+
+def load_clickhouse(
+    source: str, series_ids: Sequence[str] | None = None, frequency: str | None = None
+) -> tuple[dict[str, pd.Series], dict[str, int]]:
+    """Stored series on a regular grid, plus each one's seasonal period."""
+    from daf.ingest.fred import PANDAS_FREQ
+    from daf.quality.runner import regularize
+    from daf.storage import ClickHouseStore
+
+    store = ClickHouseStore()
+    meta = store.get_series_meta(source)
+    if frequency:
+        meta = meta[meta["frequency"] == frequency]
+    if series_ids:
+        meta = meta[meta["series_id"].isin(series_ids)]
+
+    series: dict[str, pd.Series] = {}
+    seasons: dict[str, int] = {}
+    for row in meta.itertuples(index=False):
+        s = store.fetch_series(source, row.series_id)
+        if s.empty:
+            continue
+        freq = PANDAS_FREQ.get(row.frequency) if source == "fred" else row.frequency
+        series[row.series_id] = regularize(s, freq)
+        seasons[row.series_id] = int(row.seasonal_period)
+    return series, seasons
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    names = [v.name for v in DEFAULT_VARIANTS]
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    data = parser.add_mutually_exclusive_group(required=True)
+    data.add_argument("--source", choices=["fred", "telecom_milan"], help="read from ClickHouse")
+    data.add_argument("--csv", type=Path, help="long-format CSV (series_id, ts, value)")
+    parser.add_argument("--series", nargs="*", help="only these series ids")
+    parser.add_argument("--frequency", help="only series with this stored frequency, e.g. M")
+    parser.add_argument("--season", type=int, help="override the seasonal period")
+    parser.add_argument("--model-id", default=BenchmarkConfig.model_id)
+    parser.add_argument("--prediction-length", type=int, default=BenchmarkConfig.prediction_length)
+    parser.add_argument("--context-length", type=int, default=BenchmarkConfig.context_length)
+    parser.add_argument("--n-windows", type=int, default=BenchmarkConfig.n_windows)
+    parser.add_argument("--batch-size", type=int, default=BenchmarkConfig.batch_size)
+    parser.add_argument("--repeats", type=int, default=BenchmarkConfig.repeats)
+    parser.add_argument("--threads", type=int, help="torch CPU threads")
+    parser.add_argument("--variants", help=f"comma-separated subset of: {', '.join(names)}")
+    parser.add_argument("--out", type=Path, default=Path("reports"))
+    parser.add_argument("--to-clickhouse", action="store_true", help="also store results")
+    args = parser.parse_args(argv)
+
+    if args.csv:
+        name, series, seasons = args.csv.stem, load_csv(args.csv), {}
+        if args.series:
+            series = {k: v for k, v in series.items() if k in args.series}
+    else:
+        name = args.source
+        series, seasons = load_clickhouse(args.source, args.series, args.frequency)
+    if not series:
+        parser.error("no series matched")
+
+    if args.season:
+        seasons = {sid: args.season for sid in series}
+    season = args.season or (Counter(seasons.values()).most_common(1)[0][0] if seasons else 1)
+
+    variants = list(DEFAULT_VARIANTS)
+    if args.variants:
+        wanted = {v.strip() for v in args.variants.split(",")}
+        unknown = wanted - set(names)
+        if unknown:
+            parser.error(f"unknown variants: {sorted(unknown)}")
+        variants = [v for v in variants if v.name in wanted]
+
+    config = BenchmarkConfig(
+        model_id=args.model_id,
+        prediction_length=args.prediction_length,
+        context_length=args.context_length,
+        n_windows=args.n_windows,
+        batch_size=args.batch_size,
+        season=season,
+        repeats=args.repeats,
+        num_threads=args.threads,
+    )
+    results = run_benchmark(series, config, variants, seasons)
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    report = to_markdown(results, title=name)
+    results.to_csv(args.out / f"benchmark_{name}.csv", index=False)
+    (args.out / f"benchmark_{name}.md").write_text(report)
+    print(report)
+
+    if args.to_clickhouse:
+        from daf.storage import ClickHouseStore
+
+        ClickHouseStore().insert_benchmark(results, source=name, run_id=uuid.uuid4().hex)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

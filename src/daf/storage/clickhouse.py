@@ -23,6 +23,25 @@ FLAG_COLUMNS = [
     "evidence",
     "run_id",
 ]
+BENCHMARK_COLUMNS = [
+    "run_id",
+    "source",
+    "model_id",
+    "variant",
+    "quantized",
+    "prune_strategy",
+    "keep_ratio",
+    "context_length",
+    "prediction_length",
+    "n_windows",
+    "mase",
+    "wql",
+    "latency_ms_p50",
+    "latency_ms_p95",
+    "throughput",
+    "model_size_mb",
+    "encoder_tokens",
+]
 
 
 class ClickHouseStore:
@@ -146,6 +165,39 @@ class ClickHouseStore:
             for r in flags.itertuples(index=False)
         ]
         self.client.insert("quality_flags", rows, column_names=FLAG_COLUMNS)
+        return len(rows)
+
+    # -- benchmarks -----------------------------------------------------
+
+    def insert_benchmark(self, results: pd.DataFrame, source: str, run_id: str) -> int:
+        cfg = results.attrs.get("config", {})
+
+        def num(value: Any) -> float:
+            return float("nan") if value is None else float(value)
+
+        rows = [
+            [
+                run_id,
+                source,
+                cfg.get("model_id", ""),
+                r.variant,
+                bool(r.quantized),
+                r.strategy if isinstance(r.strategy, str) else "",
+                num(r.keep_ratio),
+                int(cfg.get("context_length", 0)),
+                int(cfg.get("prediction_length", 0)),
+                int(results.attrs.get("n_windows", 0)),
+                num(r.mase),
+                num(r.wql),
+                num(r.latency_ms_p50),
+                num(r.latency_ms_p95),
+                num(r.throughput),
+                num(r.model_size_mb),
+                num(r.encoder_tokens),
+            ]
+            for r in results.itertuples(index=False)
+        ]
+        self.client.insert("benchmark_results", rows, column_names=BENCHMARK_COLUMNS)
         return len(rows)
 
     def get_series_meta(self, source: str) -> pd.DataFrame:
